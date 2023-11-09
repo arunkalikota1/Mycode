@@ -1,5 +1,129 @@
-Test code
-test codefgdfgdgsdfgdf
-dfgsdfg
-dfgsdfg
-sdfg
+#!/usr/bin/python3
+import argparse
+import os
+import json
+from datetime import datetime as dt ,timedelta
+import boto3
+import psycopg2
+import re
+
+def get_secret(secret_name, region):
+
+    # Create a Secrets Manager client
+    session = boto3.session.Session()
+    client = session.client(
+        service_name='secretsmanager',
+        region_name=region
+    )
+
+    get_secret_value_response = client.get_secret_value(
+            SecretId=secret_name
+    )
+    return get_secret_value_response['SecretString']
+
+
+if __name__ == "__main__":
+    # Initiate the parser
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--project_id", "-project_id", help="project id")
+    parser.add_argument("--mlops_env", "-mlops_env", help="Environment details")
+    parser.add_argument("--platform_env", "-platform_env", help="Platform environment details")
+    
+    #Read the arguments provided to the script  
+    args = parser.parse_args()
+    assert len(args.project_id) <= 15, "Project name is specified incorrectly"
+    assert (args.mlops_env == "LAB" or args.mlops_env == "BUILD" or args.mlops_env == "VALIDATE" or args.mlops_env == "DEPLOY") , "MLOps environment should be LAB/BUILD/VALIDATE/DEPLOY"
+    assert (args.platform_env == "DEV" or args.platform_env == "QA" or args.platform_env == "PROD" ) , "Platform environment should be DEV/QA/PROD"
+
+    if args.project_id:
+            project_id = args.project_id
+    if args.mlops_env:
+            mlops_env = args.mlops_env
+    if args.platform_env:
+            platform_env = args.platform_env
+
+    if(platform_env == 'DEV'):            
+        secret_arn="arn:aws:secretsmanager:eu-west-1:834698993223:secret:SCRT-F1AIPLTSEC01-DEV-001-nQuGJQ"
+        secret_region="eu-west-1"
+        host_rds_f1portal= "rds-f1portaldev.aws.novartis.net"
+        rds_database_f1portal="f1portal_appdb"
+        v_rds_user_f1portal="f1portaldev"
+        project_id = project_id.replace("VDWS","DWS").replace("DDWS","DWS")
+
+    elif(platform_env == 'QA'):
+        secret_arn="arn:aws:secretsmanager:eu-west-1:813564327684:secret:SCRT-F1AIPLTSEC01-QA-001-gdDbUc"
+        secret_region="eu-west-1"
+        host_rds_f1portal= "rds-f1portaltestqa01.aws.novartis.net"
+        rds_database_f1portal="f1portal_appdb"
+        v_rds_user_f1portal="f1portaltestqauser01"
+        project_id = project_id.replace("VTWS","TWS").replace("DTWS","TWS")
+
+    elif(platform_env == 'PROD'):
+        secret_arn="arn:aws:secretsmanager:eu-west-1:931349215314:secret:SCRT-F1AIPLTSEC01-PROD-001-OBJISJ"
+        secret_region="eu-west-1"
+        host_rds_f1portal="rds-f1portalprd01.aws.novartis.net"
+        rds_database_f1portal="f1portal_appdb"
+        v_rds_user_f1portal="f1portalprduser01"
+        project_id = project_id.replace("VPWS","PWS").replace("DPWS","PWS")
+
+               
+    connection=""
+    value=get_secret(secret_arn, secret_region)
+    password=json.loads(value)
+    v_password=password['rds_password_key_f1portal']
+
+    connection = psycopg2.connect(user=v_rds_user_f1portal,
+                                password=v_password,
+                                host=host_rds_f1portal,
+                                database=rds_database_f1portal)
+
+    cursor = connection.cursor()
+    
+    data_tuple = (project_id, '%gmt%')
+
+    sql_query = "select value from f1.f1ai_provisioning_details where project_id=%s and value like %s ;"     
+
+    cursor.execute(sql_query, data_tuple)
+    
+    records = cursor.fetchall()
+
+    permission_list=[]
+
+    if len(records)==0:
+        print("{'error': 'Master metadata table does not have details about this workspace hence exiting...'}")
+
+    for row in records:
+
+        grp_url =  row[0]
+
+        grp_name = re.search('Freetext=([a-z_A-Z0-9]*)&',grp_url).group(1)
+
+        if grp_name.endswith("_UCE") == True and (mlops_env == "LAB" or mlops_env =="BUILD" or mlops_env =="VALIDATE" or mlops_env == "DEPLOY"):
+            permission="CAN_MANAGE"
+            permission_list.append({"group_name":grp_name,"permission_level":permission})
+
+        if grp_name.endswith("_DEV") == True and (mlops_env == "LAB" or mlops_env =="BUILD"):
+            permission="CAN_MANAGE"
+            permission_list.append({"group_name":grp_name,"permission_level":permission})
+
+        if grp_name.endswith("_DEV") == True and (mlops_env == "DEPLOY" or mlops_env =="VALIDATE"):
+            permission="CAN_VIEW"
+            permission_list.append({"group_name":grp_name,"permission_level":permission})
+
+        if grp_name.find("LDS") != -1 and (mlops_env == "LAB" or mlops_env =="BUILD"): 
+            permission="CAN_MANAGE"
+            permission_list.append({"group_name":grp_name,"permission_level":permission})
+
+        if grp_name.endswith("_OPS") == True and (mlops_env == "LAB" or mlops_env =="BUILD" or mlops_env =="VALIDATE" or mlops_env == "DEPLOY"):
+            permission="CAN_MANAGE"
+            permission_list.append({"group_name":grp_name,"permission_level":permission})
+
+        if grp_name.endswith("_VAL") == True and (mlops_env =="VALIDATE"):
+            permission="CAN_MANAGE_RUN"
+            permission_list.append({"group_name":grp_name,"permission_level":permission})
+
+        if grp_name.endswith("_DEP") == True and (mlops_env == "DEPLOY"):
+            permission="CAN_MANAGE_RUN"
+            permission_list.append({"group_name":grp_name,"permission_level":permission})
+
+    print(json.dumps(permission_list))
