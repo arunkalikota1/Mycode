@@ -1,0 +1,6 @@
+ if args.project_id:
+            project_id = args.project_id
+    if args.mlops_env:
+            mlops_env = args.mlops_env
+    if args.platform_env:
+            platform_env = args.platform_env
